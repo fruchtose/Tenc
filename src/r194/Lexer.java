@@ -7,12 +7,16 @@ public class Lexer {
 	enum Token {
 		NONE(null),
 		EOF(null),
+		LITCHAR("'[a-zA-Z0-9]'"),
 		COMMENT("//[^\n]*"),
 		OPEN_MULTILINE_COMMENT("/\\*"),
 		CLOSE_MULTILINE_COMMENT("\\*/"),
 		RETURN("return"),
+		IF("if"),
+		WHILE("while"),
 		WHITESPACE("\\p{Space}"),
 		TYPE_NAME("(int|void)"),
+		HEXNUMBER("[+-]??0x[0-9a-fA-F]*"),
 		NUMBER("[-+]??[0-9]+"),
 		PLUS("\\+"),
 		PLUS_ASSIGN("\\+="),
@@ -20,14 +24,23 @@ public class Lexer {
 		TIMES("\\*"),
 		DIVIDE("\\/"),
 		MOD("\\%"),
+		GREATER(">"),
+		LESSTHAN("<"),
+		GREATEREQ(">="),
+		LESSEQ("<="),
+		EQUAL("=="),
+		AND("&&"),
+		OR("||"),
 		COMMA(","),
 		OPEN_PAREN("\\("),
 		CLOSE_PAREN("\\)"),
 		OPEN_BRACK("\\{"),
 		CLOSE_BRACK("\\}"),
+		OPEN_SQUARE("\\["),
+		CLOSE_SQUARE("\\]"),
 		ASSIGN("="),
 		STAT_END(";"),
-		IDENT("[a-zA-Z\\_][a-zA-Z\\_1-9]*");
+		IDENT("[a-zA-Z\\_][a-zA-Z\\_0-9]*");
 		
 		Pattern pattern;
 		
@@ -83,7 +96,7 @@ public class Lexer {
 		while (end < input.length()){
 			if (!isMatchable(input.substring(start, end + 1))){
 				String token = input.substring(start, end);
-				if (isMatchable(token) || commentState){
+				if (!token.equals("") && (isMatchable(token) || commentState)){
 					Token type = Token.getMatching(token);
 					
 					// Checks for open multi-line comment

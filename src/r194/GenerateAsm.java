@@ -2,15 +2,23 @@ package r194;
 
 import java.util.*;
 
-import r194.CodeGen.PrimType;
 import r194.Parser.*;
+import r194.Lexer.*;
 
 public class GenerateAsm {
 	static final String functionMangle = "func_%s";
+	enum PrimType { VOID, INT };
+	
 	
 	static void error(String s) {
 		System.err.println(s);
 		System.exit(1);
+	}
+	
+	static int uuid = 0;
+	static String getUniqueLabel(String prefix){
+		uuid++;
+		return prefix + "_gen_label_" + uuid;
 	}
 	
 	static PrimType getPrimType(String s){
@@ -25,12 +33,11 @@ public class GenerateAsm {
 	public List<String> generate(AbstractSyntaxNode program){
 		List<String> assembly = new ArrayList<>();
 		List<AbstractSyntaxNode> funcs = program.children;
-		
 		//add "prologue"
 		assembly.add("SET PUSH, exit");
 		assembly.add("SET PUSH, exit"); //lol, I don't know. It works...
 		assembly.add("SET PC, func_main");
-		assembly.add(":exit SET PC, exit");
+		assembly.add(":exit SUB PC, 1");
 		
 		Map<String, Type> functions = new HashMap<>();
 		for (AbstractSyntaxNode node : funcs){
@@ -110,12 +117,17 @@ public class GenerateAsm {
 		public static Statement getFor(AbstractSyntaxNode node, String func, Map<String, Type> functions, Map<String, Integer> offsets){
 			if (node.type == ASTType.ASSIGN || node.type == ASTType.CREATE){
 				return new Assignment(node, functions, offsets);
+			} else if (node.type == ASTType.MEMSET){
+				return new Memset(node, functions, offsets);
 			} else if (node.type == ASTType.EXPR){
 				return new Expression(node, Factor.regToUse, functions, offsets);
 			} else if (node.type == ASTType.RET){
 				return new Return(node, func, functions, offsets);
-			} else {
-				error("No such statement " + node.type);
+			} else if (node.type == ASTType.IF){
+				return new If(node, func, functions, offsets);
+			} else if (node.type == ASTType.WHILE){
+				return new While(node, func, functions, offsets);
+			} else { error("No such statement " + node.type);
 				return null;
 			}
 		}
@@ -149,6 +161,255 @@ public class GenerateAsm {
 			assembly.add("SET I, SP");
 			if (offset != 0) assembly.add("ADD I, " + offset);
 			assembly.add("SET [I], " + regToUse);
+		}
+	}
+	
+	public static class Memset extends Statement {
+		static final String regToUse = "X";
+		Expression address;
+		Expression setTo;
+		Map<String, Integer> offsets;
+		
+		public Memset(AbstractSyntaxNode node, Map<String, Type> functions, Map<String, Integer> offsets) {
+			this.offsets = offsets;
+			address = new Expression(node.children.get(0), "J", functions, offsets);
+			setTo = new Expression(node.children.get(1), regToUse, functions, offsets);
+		}
+		
+		@Override
+		public void fillInCode(List<String> assembly) {
+			setTo.fillInCode(assembly);
+			address.fillInCode(assembly);
+			assembly.add("SET [J], " + regToUse);
+		}
+	}
+	
+	public static class If extends Statement {
+		Condition cond;
+		List<Statement> statements;
+		String blockStart;
+		String blockEnd;
+		
+		public If(AbstractSyntaxNode node, String func, Map<String, Type> functions, Map<String, Integer> offsets) {
+			blockStart = getUniqueLabel("start_if_block");
+			blockEnd = getUniqueLabel("end_if_block");
+			cond = new Condition(node.children.get(0), functions, offsets, "SET PC, " + blockStart);
+			
+			statements = new ArrayList<>();
+			for (AbstractSyntaxNode stat : node.children.get(1).children){
+				statements.add(Statement.getFor(stat, func, functions, offsets));
+			}
+		}
+		
+		@Override
+		public void fillInCode(List<String> assembly) {
+			cond.fillInCode(assembly);
+			assembly.add("SET PC, " + blockEnd);
+			assembly.add(":" + blockStart);
+			for (Statement s : statements){
+				s.fillInCode(assembly);
+			}
+			assembly.add(":" + blockEnd);
+		}
+	}
+	
+	public static class While extends Statement {
+		Condition cond;
+		List<Statement> statements;
+		String condStart;
+		String blockStart;
+		String blockEnd;
+		
+		public While(AbstractSyntaxNode node, String func, Map<String, Type> functions, Map<String, Integer> offsets) {
+			condStart = getUniqueLabel("start_while_cond");
+			blockStart = getUniqueLabel("start_while_block");
+			blockEnd = getUniqueLabel("end_while_block");
+			cond = new Condition(node.children.get(0), functions, offsets, "SET PC, " + blockStart);
+			
+			statements = new ArrayList<>();
+			for (AbstractSyntaxNode stat : node.children.get(1).children){
+				statements.add(Statement.getFor(stat, func, functions, offsets));
+			}
+		}
+		
+		@Override
+		public void fillInCode(List<String> assembly) {
+			assembly.add(":" + condStart);
+			cond.fillInCode(assembly);
+			assembly.add("SET PC, " + blockEnd);
+			assembly.add(":" + blockStart);
+			for (Statement s : statements){
+				s.fillInCode(assembly);
+			}
+			assembly.add("SET PC, " + condStart);
+			assembly.add(":" + blockEnd);
+		}
+	}
+	
+	public static class Condition implements FillIn {
+		List<AbstractSyntaxNode> nodes;
+		Map<String, Type> functions;
+		Map<String, Integer> offsets;
+		String instruction;
+		
+		//a class that takes one instruction to execute if the condition is true. This instruction should generally be a jump :)
+		public Condition(AbstractSyntaxNode node, Map<String, Type> functions, Map<String, Integer> offsets, String instruction){
+			nodes = node.children;
+			this.functions = functions;
+			this.offsets = offsets;
+			this.instruction = instruction;
+		}
+		
+		@Override
+		public void fillInCode(List<String> assembly) {
+			System.out.println("Filling in cond code: " + nodes.size());
+			if (nodes.size() == 1){
+				ConditionTerm term = new ConditionTerm(nodes.get(0), functions, offsets, instruction);
+				term.fillInCode(assembly);
+			}
+			else {
+				boolean first = true;
+				String trueLabel = getUniqueLabel("or-chain-true");
+				String falseLabel = getUniqueLabel("or-chain-false");
+				for (int i = 0; i < nodes.size(); i++){
+					if (nodes.get(i).type == ASTType.OP){
+						if (i == 0 || i == nodes.size() - 1){
+							error("Unexpected &&");
+						}
+						if (!((Lexeme)nodes.get(i).content).matched.equals("||")){
+							error("Unexpected op " + nodes.get(i).content);
+						}
+						
+						if (first){
+							ConditionFactor a = new ConditionFactor(nodes.get(i - 1), functions, offsets, "SET PC, " + trueLabel);
+							ConditionFactor b = new ConditionFactor(nodes.get(i + 1), functions, offsets, "SET PC, " + trueLabel);
+							a.fillInCode(assembly);
+							b.fillInCode(assembly);
+							first = false;
+						}
+						else {
+							ConditionFactor c = new ConditionFactor(nodes.get(i + 1), functions, offsets, "SET PC, " + trueLabel);
+							c.fillInCode(assembly);
+							assembly.add("SET PC, " + falseLabel);
+						}
+						assembly.add(":" + trueLabel);
+						assembly.add(instruction);
+						assembly.add(":" + falseLabel);
+					}
+				}
+			}
+		}
+	}
+	
+	public static class ConditionTerm  implements FillIn {
+		Map<String, Type> functions;
+		Map<String, Integer> offsets;
+		List<AbstractSyntaxNode> nodes;
+		String instruction;
+		
+		public ConditionTerm(AbstractSyntaxNode node, Map<String, Type> functions, Map<String, Integer> offsets, String instruction) {
+			nodes = node.children;
+			this.functions = functions;
+			this.offsets = offsets;
+			this.instruction = instruction;
+		}
+		
+		@Override
+		public void fillInCode(List<String> assembly) {
+			System.out.println("term gen: " + nodes.size());
+			if (nodes.size() == 1){
+				ConditionFactor fac = new ConditionFactor(nodes.get(0), functions, offsets, instruction);
+				fac.fillInCode(assembly);
+			}
+			else {
+				boolean first = true;
+				String falseLabel = getUniqueLabel("and-chain-false");
+				for (int i = 0; i < nodes.size(); i++){
+					if (nodes.get(i).type == ASTType.OP){
+						if (i == 0 || i == nodes.size() - 1){
+							error("Unexpected &&");
+						}
+						if (!((Lexeme)nodes.get(i).content).matched.equals("&&")){
+							error("Unexpected op " + nodes.get(i).content);
+						}
+						
+						if (first){
+							String aTrueLabel = getUniqueLabel("a-true");
+							ConditionFactor a = new ConditionFactor(nodes.get(i - 1), functions, offsets, "SET PC, " + aTrueLabel);
+							String bTrueLabel = getUniqueLabel("b-true");
+							ConditionFactor b = new ConditionFactor(nodes.get(i + 1), functions, offsets, "SET PC, " + bTrueLabel);
+							a.fillInCode(assembly);
+							assembly.add("SET PC, " + falseLabel);
+							assembly.add(":" + aTrueLabel);
+							b.fillInCode(assembly);
+							assembly.add("SET PC, " + falseLabel);
+							assembly.add(":" + bTrueLabel);
+							first = false;
+						}
+						else {
+							String cTrueLabel = getUniqueLabel("c-true");
+							ConditionFactor c = new ConditionFactor(nodes.get(i + 1), functions, offsets, "SET PC, " + cTrueLabel);
+							c.fillInCode(assembly);
+							assembly.add("SET PC, " + falseLabel);
+							assembly.add(":" + cTrueLabel);
+						}
+						assembly.add(instruction);
+						assembly.add(":" + falseLabel);
+					}
+				}
+			}
+		}
+	}
+	
+	public static class ConditionFactor implements FillIn {
+		String regToUse = "B";
+		Expression e1; //to J
+		Expression e2; //to regToUse
+		String op;
+		String instruction;
+		
+		public ConditionFactor(AbstractSyntaxNode node, Map<String, Type> functions, Map<String, Integer> offsets, String instruction) {
+			e1 = new Expression(node.children.get(0), "J", functions, offsets);
+			e2 = new Expression(node.children.get(2), regToUse, functions, offsets);
+			this.op = ((Lexeme)node.children.get(1).content).matched;
+			this.instruction = instruction;
+		}
+
+		@Override
+		public void fillInCode(List<String> assembly) {
+			e1.fillInCode(assembly);
+			e2.fillInCode(assembly);
+			
+			if (op.equals(">")){
+				assembly.add("IFG J, " + regToUse);
+				assembly.add(instruction);
+			}
+			else if (op.equals(">=")){
+				assembly.add("IFG J, " + regToUse);
+				assembly.add(instruction);
+				assembly.add("IFE J, " + regToUse);
+				assembly.add(instruction);
+			}
+			else if (op.equals("<")){
+				String falsy = getUniqueLabel("lessfalse");
+				assembly.add("IFG J, " + regToUse);
+				assembly.add("SET PC, " + falsy);
+				assembly.add("IFE J, " + regToUse);
+				assembly.add("SET PC, " + falsy);
+				assembly.add(instruction);
+				assembly.add(":" + falsy);
+			}
+			else if (op.equals("<=")){
+				String falsy = getUniqueLabel("lesseqfalse");
+				assembly.add("IFG J, " + regToUse);
+				assembly.add("SET PC, " + falsy);
+				assembly.add(instruction);
+				assembly.add(":" + falsy);
+			}
+			else if (op.equals("==")){
+				assembly.add("IFE J, " + regToUse);
+				assembly.add(instruction);
+			}
 		}
 	}
 	
@@ -308,8 +569,24 @@ public class GenerateAsm {
 				return new Identifier(node, offsets);
 			} else if (node.type == ASTType.EXPR){
 				return new SubExpr(node, functions, offsets);
+			} else if (node.type == ASTType.MEMGET){
+				return new Memget(node, functions, offsets);
 			} else error("Unknown factor type " + node.type);
 			return null;
+		}
+	}
+	
+	public static class Memget extends Factor implements FillIn {
+		Expression expr;
+		
+		public Memget(AbstractSyntaxNode node, Map<String, Type> functions, Map<String, Integer> offsets) {
+			expr = new Expression(node.children.get(0), "J", functions, offsets);
+		}
+		
+		@Override
+		public void fillInCode(List<String> assembly) {
+			expr.fillInCode(assembly);
+			assembly.add("SET "  + regToUse + ", [J]");
 		}
 	}
 	
