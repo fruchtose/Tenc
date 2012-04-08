@@ -15,6 +15,7 @@ public class Lexer {
 		TYPE_NAME("(int|void)"),
 		NUMBER("[-+]??[0-9]+"),
 		PLUS("\\+"),
+		PLUS_ASSIGN("\\+="),
 		MINUS("\\-"),
 		TIMES("\\*"),
 		DIVIDE("\\/"),
